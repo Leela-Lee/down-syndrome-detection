@@ -1,19 +1,19 @@
-# Prenatal Down Syndrome Detection via Nuchal Translucency Analysis in Fetal Ultrasound
+# Deep Learning-Based Classification and Detection of Nuchal Translucency in Prenatal Ultrasound Images
 
-> **A two-stage deep learning pipeline for automated Nuchal Translucency (NT) region detection and Down Syndrome risk classification in first-trimester fetal ultrasound images.**
+> **A two-stage deep learning pipeline for automated Nuchal Translucency (NT) detection and Down Syndrome risk classification in first-trimester fetal ultrasound images.**
 
 ---
 
 ## Abstract
 
-Down Syndrome (Trisomy 21) is one of the most common chromosomal abnormalities. Nuchal Translucency (NT) measurement during the first trimester is the standard prenatal screening marker, but manual assessment is time-consuming, operator-dependent, and inaccessible in low-resource settings.
+Down Syndrome (Trisomy 21) is one of the most common chromosomal abnormalities. Nuchal Translucency (NT) — a fluid-filled space at the back of a fetus's neck — is the standard first-trimester prenatal screening marker, measured via ultrasound between 11–14 weeks of pregnancy. Manual NT assessment is time-consuming, operator-dependent, and inaccessible in resource-limited settings.
 
 This project presents a two-stage deep learning pipeline:
 
-1. **Stage 1 — NT Detection:** YOLOv8n object detection localises the NT region in raw fetal ultrasound images — **96% bounding-box accuracy**
-2. **Stage 2 — Risk Classification:** A custom CNN classifies the NT plane as *Standard* (normal) or *Non-Standard* (abnormal/DS risk) — **90% classification accuracy**
+1. **Stage 1 — Classification:** A custom CNN classifies fetal ultrasound planes as *Standard* or *Non-Standard* — **89% accuracy**
+2. **Stage 2 — NT Detection:** YOLOv8 object detection localises the NT bounding box — **mAP@0.5: 96.8%, Precision: 94.6%, Recall: 95.7%**
 
-The system assists clinicians by providing fast, automated, and reproducible NT assessment — reducing operator dependency and enabling broader prenatal screening access.
+YOLOv8 outperforms YOLOv5 on all detection metrics, and the full pipeline assists clinicians in automated, reproducible prenatal NT assessment.
 
 ---
 
@@ -22,67 +22,78 @@ The system assists clinicians by providing fast, automated, and reproducible NT 
 - [Dataset](#dataset)
 - [Methodology](#methodology)
 - [Model Architecture](#model-architecture)
-- [Hyperparameter Tuning](#hyperparameter-tuning)
 - [Results](#results)
 - [Project Structure](#project-structure)
 - [Setup & Installation](#setup--installation)
 - [Usage](#usage)
 - [Demo / Inference](#demo--inference)
 - [Requirements](#requirements)
-- [Citation](#citation)
+- [References](#references)
 
 ---
 
 ## Dataset
 
-### Stage 1 — Detection
-| Split | Source |
-|-------|--------|
-| Train | Kaggle — `object-detection/Train/ProcessedData` |
-| Test  | Kaggle — `object-detction-test/Test/Images` |
-| Format | PNG images + `.txt` bounding box annotations |
-| Class | `NT` (Nuchal Translucency region) |
-| Train/Val split | 80% / 20% (random shuffle) |
+- **Source:** 2D sagittal-view fetal ultrasound images — Shenzhen People's Hospital
+- **Total images:** 1,528 (1,519 pregnant females)
+- **Annotations:** `ObjectDetection.xlsx` — bounding box labels for 9 fetal structures including NT, Nasal Bone, Thalami, Midbrain, Palate, 4th Ventricle, Cisterna Magna, Nasal Tip, Nasal Skin
+- **External test set:** 156 images — Longhua branch, Shenzhen People's Hospital
 
-### Stage 2 — Classification
-| Split | Source |
-|-------|--------|
-| Train | Kaggle — `classification/New folder/Train - Copy/` |
-| Test  | Kaggle — `classification/New folder/Internal Test Set/` |
-| Classes | `Standard` (label 1) / `Non-Standard` (label 0) |
+### Classification Split
 
-> **Note:** Datasets contain private/clinical fetal ultrasound scans. Access is subject to original Kaggle dataset licenses.
+| Class | Images |
+|-------|--------|
+| Standard | 812 |
+| Non-Standard | Variable |
+| Internal Test Set | 156 (72 Standard, 84 Non-Standard) |
+
+### Detection Split (NT-annotated images)
+
+| | Count |
+|--|-------|
+| Total NT-annotated | 1,110 |
+| After deduplication | 1,074 |
+| Train / Val / Test | 80 : 10 : 10 |
 
 ---
 
 ## Methodology
 
-### Shared Preprocessing (Both Stages)
-
-Applied identically to all splits before training:
+### Preprocessing (Both Stages)
 
 | Step | Detail |
 |------|--------|
 | Grayscale conversion | `cv2.IMREAD_GRAYSCALE` |
-| CLAHE enhancement | `clipLimit=2.0`, `tileGridSize=(8,8)` — improves NT visibility in low-contrast scans |
-| Gaussian denoising | Kernel `(3,3)` — reduces ultrasound speckle noise |
-| Resize | `512×512` px |
-| 3-channel conversion | Grayscale → RGB (`cv2.merge`) for model compatibility |
+| CLAHE enhancement | `clipLimit=2.0`, `tileGridSize=(8×8)` |
+| Gaussian denoising | `kernel=(3×3)` |
+| Resize | `225×225` px (classification) / `512×512` px (detection) |
+| RGB conversion | Grayscale → 3-channel merge |
 
----
+### Stage 1 — CNN Classification
 
-### Stage 1 — YOLOv8 NT Detection
+- **Input:** Preprocessed ultrasound image `(512, 512, 3)`
+- **Task:** Binary classification — Standard (1) vs Non-Standard (0)
+- **Training:** 80/20 train-val split; final model trained for up to 150 epochs with early stopping
 
-#### Label Conversion
-Original annotations in `[class, y_min, x_min, y_max, x_max]` (pixel coordinates) are converted to YOLO normalised format:
-
+**Final model config:**
 ```
-class_id  x_center  y_center  width  height
+Data Augmentation: RandomFlip, RandomRotation(0.1), RandomZoom(0.1), RandomContrast(0.1)
+Conv blocks: 4× [Conv2D → BatchNorm → ReLU → Dropout(0.1) → MaxPool]
+Filters: 32 → 64 → 128 → 256
+GlobalAveragePooling2D
+Dense(128) → BatchNorm → ReLU → Dropout(0.4)
+Dense(2, softmax)
+Optimizer: Adam(lr=1e-3, clipvalue=1.0)
+Loss: Categorical Crossentropy
+L2 regularization: 1e-4
+Callbacks: EarlyStopping(patience=10), ReduceLROnPlateau(factor=0.5, patience=5)
 ```
 
-All values normalised by `IMAGE_WIDTH = IMAGE_HEIGHT = 512`.
+### Stage 2 — YOLOv8 NT Detection
 
-**YAML config (`data.yaml`):**
+**Label format:** YOLO normalised — `class_id x_center y_center width height`
+
+**Data YAML:**
 ```yaml
 path: /path/to/yolo_dataset
 train: images/train
@@ -92,88 +103,65 @@ names:
   0: NT
 ```
 
-#### Two-Phase Training Strategy
-Small anatomical structures like NT benefit from progressive resolution training:
-
-| | Phase 1 — Coarse | Phase 2 — Fine-Grained |
-|--|------------------|------------------------|
-| **Weights** | `yolov8n.pt` (COCO pretrained) | Phase 1 `best.pt` |
-| **Epochs** | 50 | 100 |
-| **imgsz** | 640 | 1280 |
-| **Batch** | 16 | 8 |
-| **Optimizer** | SGD, `lr=0.001` | SGD, `lr=0.001` |
-| **Early stopping** | `patience=30` | `patience=30` |
-
----
-
-### Stage 2 — CNN Risk Classification
-
-#### Data Augmentation (Final Model)
-```python
-RandomFlip("horizontal")
-RandomRotation(0.1)
-RandomZoom(0.1)
-RandomContrast(0.1)
+**Training config:**
 ```
-
-#### Hyperparameter Tuning Progression
-
-Three iterations were explored before arriving at the final model:
-
-| Version | Key Changes | Epochs |
-|---------|------------|--------|
-| **v1** — Baseline | 4× Conv2D (32→256) + GAP + Dense(2). Adam `lr=1e-4`, no regularisation | 50 |
-| **v2** — BatchNorm + Dropout | Added BatchNormalization after each Conv. Dropout(0.5) before Dense. | 75 |
-| **v3** — Full Regularisation | L2 (`1e-4`) on all layers, `dropout_conv=0.25`, `dropout_dense=0.6`, EarlyStopping + ReduceLROnPlateau | 150 |
-| **Final** ✅ | BatchNorm + BN-after-Dense, `dropout_conv=0.1`, `dropout_dense=0.4`, `lr=1e-3`, `ReduceLROnPlateau(factor=0.5, patience=5)` | 150 |
+Model     : YOLOv8n (pretrained on COCO)
+Epochs    : 50
+imgsz     : 640
+Batch     : 32
+Confidence: 0.7
+IoU       : 0.75
+```
 
 ---
 
 ## Model Architecture
 
-### Stage 1 — YOLOv8n (Detection)
+### CNN Classifier
+
+```
+Input (512, 512, 3)
+├── Data Augmentation
+├── Conv2D(32) → BN → ReLU → Dropout(0.1) → MaxPool
+├── Conv2D(64) → BN → ReLU → Dropout(0.1) → MaxPool
+├── Conv2D(128) → BN → ReLU → Dropout(0.1) → MaxPool
+├── Conv2D(256) → BN → ReLU → Dropout(0.1) → MaxPool
+├── GlobalAveragePooling2D
+├── Dense(128) → BN → ReLU → Dropout(0.4)
+└── Dense(2, softmax)
+```
+
+### YOLOv8n Detector
 
 - **Backbone:** CSPDarknet (nano)
 - **Neck:** PANet feature pyramid
 - **Head:** Decoupled detection head
-- **Input:** `640px` (Phase 1) → `1280px` (Phase 2)
-- **Pretrained on:** COCO, fine-tuned on NT ultrasound data
-
-### Stage 2 — CNN Classifier (Final Model)
-
-```
-Input (512, 512, 3)
-│
-├── Data Augmentation (RandomFlip, RandomRotation 0.1, RandomZoom 0.1, RandomContrast 0.1)
-│
-├── Conv2D(32, 3×3, same) → BatchNorm → ReLU → Dropout(0.1) → MaxPool(2×2)
-├── Conv2D(64, 3×3, same) → BatchNorm → ReLU → Dropout(0.1) → MaxPool(2×2)
-├── Conv2D(128, 3×3, same) → BatchNorm → ReLU → Dropout(0.1) → MaxPool(2×2)
-├── Conv2D(256, 3×3, same) → BatchNorm → ReLU → Dropout(0.1) → MaxPool(2×2)
-│
-├── GlobalAveragePooling2D
-├── Dense(128) → BatchNorm → ReLU → Dropout(0.4)
-└── Dense(2, softmax)
-
-Optimizer : Adam(lr=1e-3, clipvalue=1.0)
-Loss      : Categorical Crossentropy
-Callbacks : EarlyStopping(patience=10), ReduceLROnPlateau(factor=0.5, patience=5, min_lr=1e-5)
-L2 Reg    : 1e-4 on all Conv + Dense layers
-```
+- **Class:** NT (single class)
 
 ---
 
 ## Results
 
-| Stage | Model | Metric | Score |
-|-------|-------|--------|-------|
-| NT Detection | YOLOv8n (Phase 2) | Bounding Box Accuracy | **96%** |
-| Risk Classification | CNN (Final) | Accuracy | **90%** |
-| Risk Classification | CNN (Final) | Precision | reported |
-| Risk Classification | CNN (Final) | Recall | reported |
-| Risk Classification | CNN (Final) | F1 Score | reported |
+### Stage 1 — Classification (CNN)
 
-> Precision / Recall / F1 values are available in the notebook output (`down-syndrome-class.ipynb`).
+| Class | Precision | Recall | F1-Score | Support |
+|-------|-----------|--------|----------|---------|
+| Non-Standard (0) | 0.92 | 0.87 | 0.90 | 84 |
+| Standard (1) | 0.86 | 0.92 | 0.89 | 72 |
+| **Overall Accuracy** | | | **0.89** | **156** |
+| Macro Average | 0.89 | 0.89 | 0.89 | 156 |
+
+### Stage 2 — Detection Comparison
+
+| Metric | YOLOv5 | YOLOv8 |
+|--------|--------|--------|
+| Precision | 0.899 | **0.946** |
+| Recall | 0.942 | **0.957** |
+| mAP@0.5 | 0.962 | **0.968** |
+| mAP@0.5:0.95 | 0.543 | **0.673** |
+| Box Loss | 0.02414 | 1.09107 |
+
+> YOLOv8 outperforms YOLOv5 across all primary detection metrics, particularly mAP@0.5:0.95 (+13%).
 
 ---
 
@@ -182,8 +170,8 @@ L2 Reg    : 1e-4 on all Conv + Dense layers
 ```
 down-syndrome-detection/
 │
-├── down-syndrome-yolo.ipynb       # Stage 1: NT detection (YOLOv8)
-├── down-syndrome-class.ipynb      # Stage 2: Risk classification (CNN)
+├── down-syndrome-yolo.ipynb       # Stage 2: NT detection (YOLOv8 + YOLOv5)
+├── down-syndrome-class.ipynb      # Stage 1: Standard/Non-Standard classification (CNN)
 ├── data.yaml                      # YOLOv8 dataset config
 │
 ├── data/
@@ -197,8 +185,7 @@ down-syndrome-detection/
 │       └── test/
 │
 ├── NT-Detection/
-│   ├── imgsz640/weights/best.pt   # Phase 1 weights
-│   └── imgsz1280/weights/best.pt  # Phase 2 weights (use this for inference)
+│   └── weights/best.pt            # Best YOLOv8 weights
 │
 └── README.md
 ```
@@ -208,11 +195,9 @@ down-syndrome-detection/
 ## Setup & Installation
 
 ```bash
-# Clone the repo
 git clone https://github.com/<your-username>/down-syndrome-detection.git
 cd down-syndrome-detection
 
-# Install dependencies
 pip install ultralytics --upgrade
 pip install tensorflow opencv-python matplotlib scikit-learn seaborn tqdm
 ```
@@ -221,9 +206,12 @@ pip install tensorflow opencv-python matplotlib scikit-learn seaborn tqdm
 
 ## Usage
 
-### Stage 1 — Train YOLOv8 NT Detector
+### Train CNN Classifier
 
-**Phase 1:**
+Run all cells in `down-syndrome-class.ipynb`. Ensure dataset paths point to your `Standard` / `Non-Standard` image folders.
+
+### Train YOLOv8 Detector
+
 ```python
 from ultralytics import YOLO
 
@@ -232,50 +220,23 @@ model.train(
     data="data.yaml",
     epochs=50,
     imgsz=640,
-    batch=16,
-    optimizer='SGD',
-    lr0=0.001,
-    patience=30,
-    project="NT-Detection",
-    name="imgsz640"
+    batch=32,
+    project="NT-Detection"
 )
 ```
-
-**Phase 2:**
-```python
-model = YOLO("NT-Detection/imgsz640/weights/best.pt")
-model.train(
-    data="data.yaml",
-    epochs=100,
-    imgsz=1280,
-    batch=8,
-    optimizer='SGD',
-    lr0=0.001,
-    patience=30,
-    project="NT-Detection",
-    name="imgsz1280"
-)
-```
-
-### Stage 2 — Train CNN Classifier
-
-Run all cells in `down-syndrome-class.ipynb`. The final model configuration uses:
-- `epochs=150`, `batch_size=32`
-- EarlyStopping + ReduceLROnPlateau callbacks
-- Adam `lr=1e-3`, L2 `1e-4`, BatchNorm throughout
 
 ---
 
 ## Demo / Inference
 
-### NT Region Detection
+### NT Detection
 
 ```python
 from ultralytics import YOLO
 import cv2
 
-model = YOLO("NT-Detection/imgsz1280/weights/best.pt")
-results = model.predict(source="path/to/ultrasound.png", imgsz=1280, conf=0.25)
+model = YOLO("NT-Detection/weights/best.pt")
+results = model.predict(source="path/to/ultrasound.png", imgsz=640, conf=0.7, iou=0.75)
 
 for r in results:
     img = r.plot()
@@ -283,18 +244,16 @@ for r in results:
     cv2.waitKey(0)
 ```
 
-### Down Syndrome Risk Classification
+### Risk Classification
 
 ```python
 import tensorflow as tf
 import cv2
 import numpy as np
 
-# Load saved classifier
 model = tf.keras.models.load_model("cnn_classifier.h5")
 
-# Preprocess image
-img = cv2.imread("path/to/nt_crop.png", cv2.IMREAD_GRAYSCALE)
+img = cv2.imread("path/to/image.png", cv2.IMREAD_GRAYSCALE)
 clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
 img = clahe.apply(img)
 img = cv2.GaussianBlur(img, (3,3), 0)
@@ -302,7 +261,6 @@ img = cv2.resize(img, (512, 512))
 img = cv2.merge([img, img, img])
 img = np.expand_dims(img, axis=0)
 
-# Predict
 pred = model.predict(img)
 label = "Standard" if np.argmax(pred) == 1 else "Non-Standard (DS Risk)"
 print(f"Prediction: {label} | Confidence: {np.max(pred):.2f}")
@@ -325,19 +283,13 @@ numpy
 
 ---
 
-## Citation
+## References
 
-If you use this work, please cite:
-
-```bibtex
-@misc{leelab2025downsyndrome,
-  author    = {Leela Bhargavi N R},
-  title     = {Prenatal Down Syndrome Detection via Nuchal Translucency Analysis in Fetal Ultrasound},
-  year      = {2025},
-  note      = {MTech Data Science Project, Amrita Vishwa Vidyapeetham},
-  url       = {https://github.com/<your-username>/down-syndrome-detection}
-}
-```
+1. Kasera et al. "Deep-learning computer vision can identify increased nuchal translucency in the first trimester of pregnancy." *Prenatal Diagnosis*, 2024.
+2. Reshi et al. "Deep Learning-Based Architecture for Down Syndrome Assessment During Early Pregnancy Using Fetal Ultrasound Images." *IJERR*, 2024.
+3. Thomas & Resmi. "Computational Method of Predicting Down Syndrome on Foetus by Utilizing First Trimester Ultrasound Scan." *ICSCC*, 2023.
+4. Saini. "Enhanced Detection of Down Syndrome Through CNNs: A Deep Learning Approach." *ICMCSI*, 2025.
+5. Gokulakrishnan & Selvakumar. "An Efficient Approach for Detecting Down Syndrome Fetus Images Using Deep Learning Method." *IJCESE*, 2024.
 
 ---
 
